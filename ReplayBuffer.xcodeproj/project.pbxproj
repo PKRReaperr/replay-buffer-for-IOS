@@ -1,0 +1,263 @@
+// !$*UTF8*$!
+{
+	objectVersion = 56;
+	classes = {
+	};
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A00100010000000100000001 /* ReplayBufferApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00110010000000100000001 /* ReplayBufferApp.swift */; };
+		A00100010000000100000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00110010000000100000002 /* ContentView.swift */; };
+		A00100010000000100000003 /* CameraPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00110010000000100000003 /* CameraPreviewView.swift */; };
+		A00100010000000100000004 /* ReplayBufferViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00110010000000100000004 /* ReplayBufferViewModel.swift */; };
+		A00100010000000100000005 /* ReplayBufferRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00110010000000100000005 /* ReplayBufferRecorder.swift */; };
+		A00100010000000100000006 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A00110010000000100000006 /* Assets.xcassets */; };
+		A00100010000000100000007 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A00110010000000100000008 /* Preview Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A00110010000000100000000 /* ReplayBuffer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ReplayBuffer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A00110010000000100000001 /* ReplayBufferApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayBufferApp.swift; sourceTree = "<group>"; };
+		A00110010000000100000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		A00110010000000100000003 /* CameraPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraPreviewView.swift; sourceTree = "<group>"; };
+		A00110010000000100000004 /* ReplayBufferViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayBufferViewModel.swift; sourceTree = "<group>"; };
+		A00110010000000100000005 /* ReplayBufferRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayBufferRecorder.swift; sourceTree = "<group>"; };
+		A00110010000000100000006 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A00110010000000100000007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A00110010000000100000008 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A00120010000000100000000 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A00130010000000100000000 = {
+			isa = PBXGroup;
+			children = (
+				A00130010000000100000001 /* ReplayBuffer */,
+				A00130010000000100000002 /* Preview Content */,
+				A00130010000000100000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A00130010000000100000001 /* ReplayBuffer */ = {
+			isa = PBXGroup;
+			children = (
+				A00110010000000100000001 /* ReplayBufferApp.swift */,
+				A00110010000000100000002 /* ContentView.swift */,
+				A00110010000000100000003 /* CameraPreviewView.swift */,
+				A00110010000000100000004 /* ReplayBufferViewModel.swift */,
+				A00110010000000100000005 /* ReplayBufferRecorder.swift */,
+				A00110010000000100000006 /* Assets.xcassets */,
+				A00110010000000100000007 /* Info.plist */,
+			);
+			path = ReplayBuffer;
+			sourceTree = "<group>";
+		};
+		A00130010000000100000002 /* Preview Content */ = {
+			isa = PBXGroup;
+			children = (
+				A00110010000000100000008 /* Preview Assets.xcassets */,
+			);
+			path = "ReplayBuffer/Preview Content";
+			sourceTree = "<group>";
+		};
+		A00130010000000100000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A00110010000000100000000 /* ReplayBuffer.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A00140010000000100000000 /* ReplayBuffer */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A00160010000000100000001 /* Build configuration list for PBXNativeTarget "ReplayBuffer" */;
+			buildPhases = (
+				A00150010000000100000000 /* Sources */,
+				A00120010000000100000000 /* Frameworks */,
+				A00150010000000100000001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ReplayBuffer;
+			productName = ReplayBuffer;
+			productReference = A00110010000000100000000 /* ReplayBuffer.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A00170010000000100000000 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					A00140010000000100000000 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = A00160010000000100000000 /* Build configuration list for PBXProject "ReplayBuffer" */;
+			compatibilityVersion = "Xcode 15.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A00130010000000100000000;
+			productRefGroup = A00130010000000100000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A00140010000000100000000 /* ReplayBuffer */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A00150010000000100000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A00100010000000100000006 /* Assets.xcassets in Resources */,
+				A00100010000000100000007 /* Preview Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A00150010000000100000000 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A00100010000000100000003 /* CameraPreviewView.swift in Sources */,
+				A00100010000000100000002 /* ContentView.swift in Sources */,
+				A00100010000000100000005 /* ReplayBufferRecorder.swift in Sources */,
+				A00100010000000100000001 /* ReplayBufferApp.swift in Sources */,
+				A00100010000000100000004 /* ReplayBufferViewModel.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A00180010000000100000000 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ReplayBuffer/Info.plist;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.ReplayBuffer;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A00180010000000100000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ReplayBuffer/Info.plist;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.ReplayBuffer;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		A00180010000000100000002 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				SDKROOT = iphoneos;
+			};
+			name = Debug;
+		};
+		A00180010000000100000003 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				SDKROOT = iphoneos;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A00160010000000100000000 /* Build configuration list for PBXProject "ReplayBuffer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A00180010000000100000002 /* Debug */,
+				A00180010000000100000003 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A00160010000000100000001 /* Build configuration list for PBXNativeTarget "ReplayBuffer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A00180010000000100000000 /* Debug */,
+				A00180010000000100000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A00170010000000100000000 /* Project object */;
+}
