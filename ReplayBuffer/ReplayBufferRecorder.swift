@@ -1,11 +1,10 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import Foundation
 import Photos
 
-final class ReplayBufferRecorder: NSObject {
+final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
     struct RecordedSegment {
         let url: URL
-        let startedAt: Date
         let duration: TimeInterval
     }
 
@@ -39,11 +38,15 @@ final class ReplayBufferRecorder: NSObject {
         async let audio = requestMediaAccess(for: .audio)
         async let photos = requestPhotoLibraryAccess()
 
-        return await video && audio && photos
+        let videoGranted = await video
+        let audioGranted = await audio
+        let photosGranted = await photos
+
+        return videoGranted && audioGranted && photosGranted
     }
 
     func configureSession() async throws {
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             sessionQueue.async {
                 do {
                     if self.isConfigured {
@@ -82,8 +85,9 @@ final class ReplayBufferRecorder: NSObject {
                     self.movieOutput.maxRecordedFileSize = 0
                     self.session.addOutput(self.movieOutput)
 
-                    if let connection = self.movieOutput.connection(with: .video), connection.isVideoOrientationSupported {
-                        connection.videoOrientation = .portrait
+                    if let connection = self.movieOutput.connection(with: .video),
+                       connection.isVideoRotationAngleSupported(90) {
+                        connection.videoRotationAngle = 90
                     }
 
                     self.session.commitConfiguration()
@@ -202,10 +206,9 @@ final class ReplayBufferRecorder: NSObject {
     }
 
     private func handleCompletedSegment(at outputURL: URL) {
-        let measuredDuration = max(CMTimeGetSeconds(AVURLAsset(url: outputURL).duration), 0)
-        let duration = measuredDuration > 0 ? measuredDuration : Date().timeIntervalSince(currentSegmentStart)
+        let duration = max(Date().timeIntervalSince(currentSegmentStart), 0)
 
-        segments.append(RecordedSegment(url: outputURL, startedAt: currentSegmentStart, duration: duration))
+        segments.append(RecordedSegment(url: outputURL, duration: duration))
         pruneSegmentsIfNeeded()
     }
 
@@ -222,7 +225,11 @@ final class ReplayBufferRecorder: NSObject {
         updateStatus("Saving replay to Photos...")
 
         exportQueue.async {
+            let semaphore = DispatchSemaphore(value: 0)
+
             Task {
+                defer { semaphore.signal() }
+
                 do {
                     let exportURL = try await self.buildReplayClip(from: snapshot, requestedDuration: duration)
                     try await self.saveExportToPhotoLibrary(exportURL: exportURL)
@@ -235,6 +242,8 @@ final class ReplayBufferRecorder: NSObject {
                     self.alert(error.localizedDescription)
                 }
             }
+
+            semaphore.wait()
         }
     }
 
@@ -315,7 +324,7 @@ final class ReplayBufferRecorder: NSObject {
     }
 
     private func saveExportToPhotoLibrary(exportURL: URL) async throws {
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             PHPhotoLibrary.shared().performChanges({
                 PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: exportURL)
             }) { success, error in
@@ -337,7 +346,7 @@ final class ReplayBufferRecorder: NSObject {
         case .authorized:
             return true
         case .notDetermined:
-            return await withCheckedContinuation { continuation in
+            return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
                 AVCaptureDevice.requestAccess(for: mediaType) { granted in
                     continuation.resume(returning: granted)
                 }
@@ -354,7 +363,7 @@ final class ReplayBufferRecorder: NSObject {
         case .authorized, .limited:
             return true
         case .notDetermined:
-            let newStatus = await withCheckedContinuation { continuation in
+            let newStatus = await withCheckedContinuation { (continuation: CheckedContinuation<PHAuthorizationStatus, Never>) in
                 PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
                     continuation.resume(returning: status)
                 }
@@ -469,15 +478,19 @@ private enum RecorderError: LocalizedError {
     }
 }
 
+extension AVAssetExportSession: @unchecked Sendable {}
+
 private extension AVAssetExportSession {
     func exportAsync() async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            exportAsynchronously {
-                switch self.status {
+        let session = self
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            session.exportAsynchronously {
+                switch session.status {
                 case .completed:
                     continuation.resume()
                 case .failed:
-                    continuation.resume(throwing: self.error ?? RecorderError.cannotCreateExportSession)
+                    continuation.resume(throwing: session.error ?? RecorderError.cannotCreateExportSession)
                 case .cancelled:
                     continuation.resume(throwing: CancellationError())
                 default:
