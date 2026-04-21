@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 struct ContentView: View {
@@ -100,6 +101,69 @@ struct ContentView: View {
                 }
             }
 
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Zoom")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+
+                    Spacer()
+
+                    Text(viewModel.formattedZoomFactor)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.82))
+                }
+
+                Slider(
+                    value: Binding(
+                        get: { viewModel.zoomFactor },
+                        set: { viewModel.setZoomFactor($0) }
+                    ),
+                    in: viewModel.minimumZoomFactor...viewModel.maximumZoomFactor
+                )
+                .tint(.yellow)
+                .disabled(viewModel.maximumZoomFactor <= viewModel.minimumZoomFactor)
+
+                if !viewModel.zoomPresets.isEmpty {
+                    HStack {
+                        ForEach(viewModel.zoomPresets, id: \.self) { preset in
+                            Button {
+                                viewModel.setZoomFactor(preset)
+                            } label: {
+                                Text(zoomPresetLabel(for: preset))
+                            }
+                            .buttonStyle(PresetButtonStyle(isSelected: abs(viewModel.zoomFactor - preset) < 0.1))
+                        }
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Stabilization")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+
+                if viewModel.availableStabilizationModes == [.off] {
+                    Text("This lens does not expose adjustable stabilization on the current device.")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.72))
+                } else {
+                    let columns = [
+                        GridItem(.flexible(minimum: 80), spacing: 8),
+                        GridItem(.flexible(minimum: 80), spacing: 8)
+                    ]
+
+                    LazyVGrid(columns: columns, spacing: 8) {
+                        ForEach(viewModel.availableStabilizationModes) { mode in
+                            Button(mode.label) {
+                                viewModel.setStabilizationMode(mode)
+                            }
+                            .buttonStyle(PresetButtonStyle(isSelected: viewModel.selectedStabilizationMode == mode))
+                        }
+                    }
+                }
+            }
+
             Button {
                 viewModel.toggleRecording()
             } label: {
@@ -133,6 +197,14 @@ struct ContentView: View {
         .padding(18)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
+}
+
+private func zoomPresetLabel(for preset: Double) -> String {
+    if abs(preset.rounded() - preset) < 0.05 {
+        return "\(Int(preset.rounded()))x"
+    }
+
+    return String(format: "%.1fx", preset)
 }
 
 private struct PresetButtonStyle: ButtonStyle {

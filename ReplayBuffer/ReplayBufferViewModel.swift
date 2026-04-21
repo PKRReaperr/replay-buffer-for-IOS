@@ -9,6 +9,11 @@ final class ReplayBufferViewModel: ObservableObject {
     @Published private(set) var isRecording = false
     @Published private(set) var isSaving = false
     @Published private(set) var bufferedDurationSeconds: Double = 0
+    @Published private(set) var zoomFactor: Double = 1
+    @Published private(set) var minimumZoomFactor: Double = 1
+    @Published private(set) var maximumZoomFactor: Double = 1
+    @Published private(set) var availableStabilizationModes: [CameraStabilizationMode] = [.off]
+    @Published private(set) var selectedStabilizationMode: CameraStabilizationMode = .off
     @Published var showingAlert = false
     @Published var alertMessage = ""
 
@@ -47,6 +52,26 @@ final class ReplayBufferViewModel: ObservableObject {
             }
         }
 
+        recorder.onZoomConfigurationChange = { [weak self] minimum, maximum, current in
+            Task { @MainActor in
+                self?.minimumZoomFactor = Double(minimum)
+                self?.maximumZoomFactor = Double(maximum)
+                self?.zoomFactor = Double(current)
+            }
+        }
+
+        recorder.onAvailableStabilizationModesChange = { [weak self] modes in
+            Task { @MainActor in
+                self?.availableStabilizationModes = modes
+            }
+        }
+
+        recorder.onSelectedStabilizationModeChange = { [weak self] mode in
+            Task { @MainActor in
+                self?.selectedStabilizationMode = mode
+            }
+        }
+
         recorder.onAlert = { [weak self] message in
             Task { @MainActor in
                 self?.alertMessage = message
@@ -70,6 +95,19 @@ final class ReplayBufferViewModel: ObservableObject {
 
     var canSaveReplay: Bool {
         bufferedDurationSeconds > 0 && !isSaving
+    }
+
+    var formattedZoomFactor: String {
+        if abs(zoomFactor.rounded() - zoomFactor) < 0.05 {
+            return "\(Int(zoomFactor.rounded()))x"
+        }
+
+        return String(format: "%.1fx", zoomFactor)
+    }
+
+    var zoomPresets: [Double] {
+        [1, 2, 5, 10]
+            .filter { $0 >= minimumZoomFactor - 0.01 && $0 <= maximumZoomFactor + 0.01 }
     }
 
     func start() async {
@@ -106,6 +144,14 @@ final class ReplayBufferViewModel: ObservableObject {
 
     func saveReplay() {
         recorder.exportRecentReplay(duration: replayDurationSeconds)
+    }
+
+    func setZoomFactor(_ zoomFactor: Double) {
+        recorder.setZoomFactor(CGFloat(zoomFactor))
+    }
+
+    func setStabilizationMode(_ mode: CameraStabilizationMode) {
+        recorder.setStabilizationMode(mode)
     }
 
     func handleScenePhase(_ phase: ScenePhase) {

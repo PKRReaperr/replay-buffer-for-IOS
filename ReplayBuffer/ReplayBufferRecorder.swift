@@ -2,6 +2,41 @@
 import Foundation
 import Photos
 
+enum CameraStabilizationMode: String, CaseIterable, Identifiable, Sendable {
+    case off
+    case standard
+    case cinematic
+    case auto
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .off:
+            return "Off"
+        case .standard:
+            return "Standard"
+        case .cinematic:
+            return "Cinematic"
+        case .auto:
+            return "Auto"
+        }
+    }
+
+    var avMode: AVCaptureVideoStabilizationMode {
+        switch self {
+        case .off:
+            return .off
+        case .standard:
+            return .standard
+        case .cinematic:
+            return .cinematic
+        case .auto:
+            return .auto
+        }
+    }
+}
+
 final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
     struct RecordedSegment {
         let url: URL
@@ -12,6 +47,9 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
     var onRecordingStateChange: ((Bool) -> Void)?
     var onSaveStateChange: ((Bool) -> Void)?
     var onBufferedDurationChange: ((TimeInterval) -> Void)?
+    var onZoomConfigurationChange: ((CGFloat, CGFloat, CGFloat) -> Void)?
+    var onAvailableStabilizationModesChange: (([CameraStabilizationMode]) -> Void)?
+    var onSelectedStabilizationModeChange: ((CameraStabilizationMode) -> Void)?
     var onAlert: ((String) -> Void)?
 
     private let session: AVCaptureSession
@@ -27,6 +65,9 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
     private var currentSegmentStart = Date()
     private var segments: [RecordedSegment] = []
     private var pendingExportDuration: TimeInterval?
+    private var videoDevice: AVCaptureDevice?
+    private var supportedStabilizationModes: [CameraStabilizationMode] = [.off]
+    private var selectedStabilizationMode: CameraStabilizationMode = .off
 
     init(session: AVCaptureSession) {
         self.session = session
@@ -60,6 +101,7 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
                     guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
                         throw RecorderError.cameraUnavailable
                     }
+                    self.videoDevice = videoDevice
 
                     let videoInput = try AVCaptureDeviceInput(device: videoDevice)
                     guard self.session.canAddInput(videoInput) else {
@@ -85,13 +127,19 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
                     self.movieOutput.maxRecordedFileSize = 0
                     self.session.addOutput(self.movieOutput)
 
-                    if let connection = self.movieOutput.connection(with: .video),
-                       connection.isVideoRotationAngleSupported(90) {
-                        connection.videoRotationAngle = 90
-                    }
+                    self.supportedStabilizationModes = self.availableStabilizationModes(for: videoDevice)
+                    self.selectedStabilizationMode = self.defaultStabilizationMode(from: self.supportedStabilizationModes)
+                    self.applyVideoConnectionConfiguration()
 
                     self.session.commitConfiguration()
                     self.isConfigured = true
+                    self.updateZoomConfiguration(
+                        minimum: 1,
+                        maximum: self.maximumZoomFactor(for: videoDevice),
+                        current: min(max(videoDevice.videoZoomFactor, 1), self.maximumZoomFactor(for: videoDevice))
+                    )
+                    self.updateAvailableStabilizationModes(self.supportedStabilizationModes)
+                    self.updateSelectedStabilizationMode(self.selectedStabilizationMode)
                     continuation.resume()
                 } catch {
                     self.session.commitConfiguration()
@@ -153,7 +201,11 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
 
     func exportRecentReplay(duration: TimeInterval) {
         sessionQueue.async {
-            guard self.shouldContinueRecording else { return }
+            let hasBufferedFootage = !self.segments.isEmpty
+            guard self.shouldContinueRecording || self.movieOutput.isRecording || hasBufferedFootage else {
+                self.alert("No buffered footage is available yet.")
+                return
+            }
             guard self.movieOutput.isRecording else {
                 self.exportCompletedSegments(duration: duration)
                 return
@@ -166,12 +218,40 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
         }
     }
 
+    func setZoomFactor(_ zoomFactor: CGFloat) {
+        sessionQueue.async {
+            guard let videoDevice = self.videoDevice else { return }
+
+            let maximumZoomFactor = self.maximumZoomFactor(for: videoDevice)
+            let clampedZoomFactor = min(max(zoomFactor, 1), maximumZoomFactor)
+
+            do {
+                try videoDevice.lockForConfiguration()
+                videoDevice.videoZoomFactor = clampedZoomFactor
+                videoDevice.unlockForConfiguration()
+                self.updateZoomConfiguration(minimum: 1, maximum: maximumZoomFactor, current: clampedZoomFactor)
+            } catch {
+                self.alert("The camera could not change zoom.")
+            }
+        }
+    }
+
+    func setStabilizationMode(_ mode: CameraStabilizationMode) {
+        sessionQueue.async {
+            let resolvedMode = self.supportedStabilizationModes.contains(mode) ? mode : .off
+            self.selectedStabilizationMode = resolvedMode
+            self.applyVideoConnectionConfiguration()
+            self.updateSelectedStabilizationMode(resolvedMode)
+        }
+    }
+
     private func startNewSegment() {
         guard shouldContinueRecording, !movieOutput.isRecording else { return }
 
         let url = makeSegmentURL()
         currentSegmentStart = Date()
         movieOutput.maxRecordedDuration = CMTime(seconds: segmentDuration, preferredTimescale: 600)
+        applyVideoConnectionConfiguration()
         movieOutput.startRecording(to: url, recordingDelegate: self)
     }
 
@@ -203,6 +283,50 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
         }
 
         updateBufferedDuration(segments.reduce(0) { $0 + $1.duration })
+    }
+
+    private func maximumZoomFactor(for device: AVCaptureDevice) -> CGFloat {
+        max(1, min(device.activeFormat.videoMaxZoomFactor, 10))
+    }
+
+    private func availableStabilizationModes(for device: AVCaptureDevice) -> [CameraStabilizationMode] {
+        var modes: [CameraStabilizationMode] = [.off]
+
+        for mode in [CameraStabilizationMode.standard, .cinematic, .auto] {
+            if device.activeFormat.isVideoStabilizationModeSupported(mode.avMode) {
+                modes.append(mode)
+            }
+        }
+
+        return modes
+    }
+
+    private func defaultStabilizationMode(from modes: [CameraStabilizationMode]) -> CameraStabilizationMode {
+        if modes.contains(.cinematic) {
+            return .cinematic
+        }
+
+        if modes.contains(.standard) {
+            return .standard
+        }
+
+        if modes.contains(.auto) {
+            return .auto
+        }
+
+        return .off
+    }
+
+    private func applyVideoConnectionConfiguration() {
+        guard let connection = movieOutput.connection(with: .video) else { return }
+
+        if connection.isVideoRotationAngleSupported(90) {
+            connection.videoRotationAngle = 90
+        }
+
+        let resolvedMode = supportedStabilizationModes.contains(selectedStabilizationMode) ? selectedStabilizationMode : .off
+        selectedStabilizationMode = resolvedMode
+        connection.preferredVideoStabilizationMode = resolvedMode.avMode
     }
 
     private func handleCompletedSegment(at outputURL: URL) {
@@ -395,6 +519,24 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
     private func updateBufferedDuration(_ duration: TimeInterval) {
         DispatchQueue.main.async {
             self.onBufferedDurationChange?(duration)
+        }
+    }
+
+    private func updateZoomConfiguration(minimum: CGFloat, maximum: CGFloat, current: CGFloat) {
+        DispatchQueue.main.async {
+            self.onZoomConfigurationChange?(minimum, maximum, current)
+        }
+    }
+
+    private func updateAvailableStabilizationModes(_ modes: [CameraStabilizationMode]) {
+        DispatchQueue.main.async {
+            self.onAvailableStabilizationModesChange?(modes)
+        }
+    }
+
+    private func updateSelectedStabilizationMode(_ mode: CameraStabilizationMode) {
+        DispatchQueue.main.async {
+            self.onSelectedStabilizationModeChange?(mode)
         }
     }
 
