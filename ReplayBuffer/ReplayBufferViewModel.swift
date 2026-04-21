@@ -14,6 +14,7 @@ final class ReplayBufferViewModel: ObservableObject {
     @Published private(set) var maximumZoomFactor: Double = 1
     @Published private(set) var availableStabilizationModes: [CameraStabilizationMode] = [.off]
     @Published private(set) var selectedStabilizationMode: CameraStabilizationMode = .off
+    @Published private(set) var cameraPosition: CameraPosition = .back
     @Published var showingAlert = false
     @Published var alertMessage = ""
 
@@ -72,6 +73,12 @@ final class ReplayBufferViewModel: ObservableObject {
             }
         }
 
+        recorder.onCameraPositionChange = { [weak self] position in
+            Task { @MainActor in
+                self?.cameraPosition = position
+            }
+        }
+
         recorder.onAlert = { [weak self] message in
             Task { @MainActor in
                 self?.alertMessage = message
@@ -97,6 +104,10 @@ final class ReplayBufferViewModel: ObservableObject {
         bufferedDurationSeconds > 0 && !isSaving
     }
 
+    var canSwitchCamera: Bool {
+        !isRecording && !isSaving
+    }
+
     var formattedZoomFactor: String {
         if abs(zoomFactor.rounded() - zoomFactor) < 0.05 {
             return "\(Int(zoomFactor.rounded()))x"
@@ -108,6 +119,26 @@ final class ReplayBufferViewModel: ObservableObject {
     var zoomPresets: [Double] {
         [1, 2, 5, 10]
             .filter { $0 >= minimumZoomFactor - 0.01 && $0 <= maximumZoomFactor + 0.01 }
+    }
+
+    var normalizedZoomValue: Double {
+        normalizedZoomValue(for: zoomFactor)
+    }
+
+    var targetBufferedLabel: String {
+        "\(formattedBufferedDuration) / \(formattedReplayDuration)"
+    }
+
+    var statusBadgeText: String {
+        if isSaving {
+            return "Saving"
+        }
+
+        if isRecording {
+            return "Recording"
+        }
+
+        return "Ready"
     }
 
     func start() async {
@@ -150,8 +181,20 @@ final class ReplayBufferViewModel: ObservableObject {
         recorder.setZoomFactor(CGFloat(zoomFactor))
     }
 
+    func setNormalizedZoomValue(_ value: Double) {
+        setZoomFactor(zoomFactor(forNormalized: value))
+    }
+
+    func handlePinch(scale: CGFloat, startingZoomFactor: Double) {
+        setZoomFactor(startingZoomFactor * Double(scale))
+    }
+
     func setStabilizationMode(_ mode: CameraStabilizationMode) {
         recorder.setStabilizationMode(mode)
+    }
+
+    func switchCamera() {
+        recorder.switchCamera()
     }
 
     func handleScenePhase(_ phase: ScenePhase) {
@@ -172,5 +215,29 @@ final class ReplayBufferViewModel: ObservableObject {
         }
 
         return "\(totalSeconds)s"
+    }
+
+    private func normalizedZoomValue(for zoomFactor: Double) -> Double {
+        guard maximumZoomFactor > minimumZoomFactor else { return 0 }
+
+        let minZoom = max(minimumZoomFactor, 1)
+        let clampedZoom = min(max(zoomFactor, minZoom), maximumZoomFactor)
+        let minLog = log(minZoom)
+        let maxLog = log(maximumZoomFactor)
+
+        guard maxLog > minLog else { return 0 }
+        return (log(clampedZoom) - minLog) / (maxLog - minLog)
+    }
+
+    private func zoomFactor(forNormalized value: Double) -> Double {
+        guard maximumZoomFactor > minimumZoomFactor else { return minimumZoomFactor }
+
+        let minZoom = max(minimumZoomFactor, 1)
+        let clampedValue = min(max(value, 0), 1)
+        let minLog = log(minZoom)
+        let maxLog = log(maximumZoomFactor)
+
+        guard maxLog > minLog else { return minZoom }
+        return exp(minLog + clampedValue * (maxLog - minLog))
     }
 }

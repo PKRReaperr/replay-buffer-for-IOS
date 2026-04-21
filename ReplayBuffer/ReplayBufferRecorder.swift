@@ -37,6 +37,22 @@ enum CameraStabilizationMode: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum CameraPosition: String, Identifiable, Sendable {
+    case back
+    case front
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .back:
+            return "Rear"
+        case .front:
+            return "Front"
+        }
+    }
+}
+
 final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
     struct RecordedSegment {
         let url: URL
@@ -50,6 +66,7 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
     var onZoomConfigurationChange: ((CGFloat, CGFloat, CGFloat) -> Void)?
     var onAvailableStabilizationModesChange: (([CameraStabilizationMode]) -> Void)?
     var onSelectedStabilizationModeChange: ((CameraStabilizationMode) -> Void)?
+    var onCameraPositionChange: ((CameraPosition) -> Void)?
     var onAlert: ((String) -> Void)?
 
     private let session: AVCaptureSession
@@ -65,9 +82,11 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
     private var currentSegmentStart = Date()
     private var segments: [RecordedSegment] = []
     private var pendingExportDuration: TimeInterval?
+    private var videoInput: AVCaptureDeviceInput?
     private var videoDevice: AVCaptureDevice?
     private var supportedStabilizationModes: [CameraStabilizationMode] = [.off]
     private var selectedStabilizationMode: CameraStabilizationMode = .off
+    private var cameraPosition: CameraPosition = .back
 
     init(session: AVCaptureSession) {
         self.session = session
@@ -98,17 +117,6 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
                     self.session.beginConfiguration()
                     self.session.sessionPreset = .high
 
-                    guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
-                        throw RecorderError.cameraUnavailable
-                    }
-                    self.videoDevice = videoDevice
-
-                    let videoInput = try AVCaptureDeviceInput(device: videoDevice)
-                    guard self.session.canAddInput(videoInput) else {
-                        throw RecorderError.cannotAddVideoInput
-                    }
-                    self.session.addInput(videoInput)
-
                     guard let audioDevice = AVCaptureDevice.default(for: .audio) else {
                         throw RecorderError.microphoneUnavailable
                     }
@@ -127,19 +135,12 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
                     self.movieOutput.maxRecordedFileSize = 0
                     self.session.addOutput(self.movieOutput)
 
-                    self.supportedStabilizationModes = self.availableStabilizationModes(for: videoDevice)
-                    self.selectedStabilizationMode = self.defaultStabilizationMode(from: self.supportedStabilizationModes)
+                    try self.configureVideoInput(position: .back)
                     self.applyVideoConnectionConfiguration()
 
                     self.session.commitConfiguration()
                     self.isConfigured = true
-                    self.updateZoomConfiguration(
-                        minimum: 1,
-                        maximum: self.maximumZoomFactor(for: videoDevice),
-                        current: min(max(videoDevice.videoZoomFactor, 1), self.maximumZoomFactor(for: videoDevice))
-                    )
-                    self.updateAvailableStabilizationModes(self.supportedStabilizationModes)
-                    self.updateSelectedStabilizationMode(self.selectedStabilizationMode)
+                    self.publishCameraConfiguration()
                     continuation.resume()
                 } catch {
                     self.session.commitConfiguration()
@@ -245,6 +246,30 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
         }
     }
 
+    func switchCamera() {
+        sessionQueue.async {
+            guard self.isConfigured else { return }
+            guard !self.movieOutput.isRecording else {
+                self.alert("Stop buffering before switching cameras.")
+                return
+            }
+
+            let targetPosition: CameraPosition = self.cameraPosition == .back ? .front : .back
+
+            do {
+                self.session.beginConfiguration()
+                try self.configureVideoInput(position: targetPosition)
+                self.applyVideoConnectionConfiguration()
+                self.session.commitConfiguration()
+                self.publishCameraConfiguration()
+                self.updateStatus("\(targetPosition.label) camera ready. Tap record to start buffering.")
+            } catch {
+                self.session.commitConfiguration()
+                self.alert(error.localizedDescription)
+            }
+        }
+    }
+
     private func startNewSegment() {
         guard shouldContinueRecording, !movieOutput.isRecording else { return }
 
@@ -289,6 +314,60 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
         max(1, min(device.activeFormat.videoMaxZoomFactor, 10))
     }
 
+    private func cameraDevice(for position: CameraPosition) -> AVCaptureDevice? {
+        let deviceTypes: [AVCaptureDevice.DeviceType]
+
+        switch position {
+        case .back:
+            deviceTypes = [.builtInWideAngleCamera]
+        case .front:
+            deviceTypes = [.builtInTrueDepthCamera, .builtInWideAngleCamera]
+        }
+
+        return AVCaptureDevice.DiscoverySession(
+            deviceTypes: deviceTypes,
+            mediaType: .video,
+            position: position == .back ? .back : .front
+        ).devices.first
+    }
+
+    private func configureVideoInput(position: CameraPosition) throws {
+        guard let device = cameraDevice(for: position) else {
+            throw RecorderError.cameraUnavailable
+        }
+
+        let newInput = try AVCaptureDeviceInput(device: device)
+        let previousInput = videoInput
+
+        if let previousInput {
+            session.removeInput(previousInput)
+        }
+
+        guard session.canAddInput(newInput) else {
+            if let previousInput {
+                session.addInput(previousInput)
+            }
+            throw RecorderError.cannotAddVideoInput
+        }
+
+        session.addInput(newInput)
+        videoInput = newInput
+        videoDevice = device
+        cameraPosition = position
+        supportedStabilizationModes = availableStabilizationModes(for: device)
+        selectedStabilizationMode = supportedStabilizationModes.contains(selectedStabilizationMode)
+            ? selectedStabilizationMode
+            : defaultStabilizationMode(from: supportedStabilizationModes)
+
+        do {
+            try device.lockForConfiguration()
+            device.videoZoomFactor = 1
+            device.unlockForConfiguration()
+        } catch {
+            throw RecorderError.cannotConfigureCamera
+        }
+    }
+
     private func availableStabilizationModes(for device: AVCaptureDevice) -> [CameraStabilizationMode] {
         var modes: [CameraStabilizationMode] = [.off]
 
@@ -326,7 +405,22 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
 
         let resolvedMode = supportedStabilizationModes.contains(selectedStabilizationMode) ? selectedStabilizationMode : .off
         selectedStabilizationMode = resolvedMode
-        connection.preferredVideoStabilizationMode = resolvedMode.avMode
+        if connection.isVideoStabilizationSupported {
+            connection.preferredVideoStabilizationMode = resolvedMode.avMode
+        }
+    }
+
+    private func publishCameraConfiguration() {
+        guard let videoDevice else { return }
+
+        updateZoomConfiguration(
+            minimum: 1,
+            maximum: maximumZoomFactor(for: videoDevice),
+            current: min(max(videoDevice.videoZoomFactor, 1), maximumZoomFactor(for: videoDevice))
+        )
+        updateAvailableStabilizationModes(supportedStabilizationModes)
+        updateSelectedStabilizationMode(selectedStabilizationMode)
+        updateCameraPosition(cameraPosition)
     }
 
     private func handleCompletedSegment(at outputURL: URL) {
@@ -540,6 +634,12 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
         }
     }
 
+    private func updateCameraPosition(_ position: CameraPosition) {
+        DispatchQueue.main.async {
+            self.onCameraPositionChange?(position)
+        }
+    }
+
     private func alert(_ message: String) {
         DispatchQueue.main.async {
             self.onAlert?(message)
@@ -594,6 +694,7 @@ private enum RecorderError: LocalizedError {
     case cannotAddVideoInput
     case cannotAddAudioInput
     case cannotAddMovieOutput
+    case cannotConfigureCamera
     case noSegmentsToExport
     case cannotCreateExportSession
     case photoLibrarySaveFailed
@@ -610,6 +711,8 @@ private enum RecorderError: LocalizedError {
             return "The app could not attach the audio input."
         case .cannotAddMovieOutput:
             return "The app could not create the movie output."
+        case .cannotConfigureCamera:
+            return "The selected camera could not be configured."
         case .noSegmentsToExport:
             return "There is not enough buffered footage to export yet."
         case .cannotCreateExportSession:
