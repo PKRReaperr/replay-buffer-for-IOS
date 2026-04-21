@@ -105,7 +105,7 @@ final class ReplayBufferViewModel: ObservableObject {
     }
 
     var canSwitchCamera: Bool {
-        !isRecording && !isSaving
+        !isSaving
     }
 
     var formattedZoomFactor: String {

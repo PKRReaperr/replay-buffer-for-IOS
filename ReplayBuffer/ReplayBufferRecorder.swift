@@ -82,6 +82,7 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
     private var currentSegmentStart = Date()
     private var segments: [RecordedSegment] = []
     private var pendingExportDuration: TimeInterval?
+    private var pendingCameraPosition: CameraPosition?
     private var videoInput: AVCaptureDeviceInput?
     private var videoDevice: AVCaptureDevice?
     private var supportedStabilizationModes: [CameraStabilizationMode] = [.off]
@@ -139,6 +140,9 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
                     self.applyVideoConnectionConfiguration()
 
                     self.session.commitConfiguration()
+                    if !self.session.isRunning {
+                        self.session.startRunning()
+                    }
                     self.isConfigured = true
                     self.publishCameraConfiguration()
                     continuation.resume()
@@ -178,9 +182,6 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
             if self.movieOutput.isRecording {
                 self.movieOutput.stopRecording()
             } else {
-                if self.session.isRunning {
-                    self.session.stopRunning()
-                }
                 self.updateStatus("Camera ready. Tap record to start buffering.")
                 self.updateRecordingState(false)
             }
@@ -191,8 +192,12 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
         stop()
         sessionQueue.async {
             self.pendingExportDuration = nil
+            self.pendingCameraPosition = nil
             self.segments.removeAll()
             self.updateBufferedDuration(0)
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
 
             let directory = FileManager.default.temporaryDirectory
                 .appendingPathComponent("ReplayBufferSegments", isDirectory: true)
@@ -249,22 +254,18 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
     func switchCamera() {
         sessionQueue.async {
             guard self.isConfigured else { return }
+            let targetPosition: CameraPosition = self.cameraPosition == .back ? .front : .back
+
             guard !self.movieOutput.isRecording else {
-                self.alert("Stop buffering before switching cameras.")
+                self.pendingCameraPosition = targetPosition
+                self.updateStatus("Switching to \(targetPosition.label.lowercased()) camera...")
+                self.movieOutput.stopRecording()
                 return
             }
 
-            let targetPosition: CameraPosition = self.cameraPosition == .back ? .front : .back
-
             do {
-                self.session.beginConfiguration()
-                try self.configureVideoInput(position: targetPosition)
-                self.applyVideoConnectionConfiguration()
-                self.session.commitConfiguration()
-                self.publishCameraConfiguration()
-                self.updateStatus("\(targetPosition.label) camera ready. Tap record to start buffering.")
+                try self.performCameraSwitch(to: targetPosition)
             } catch {
-                self.session.commitConfiguration()
                 self.alert(error.localizedDescription)
             }
         }
@@ -408,6 +409,16 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
         if connection.isVideoStabilizationSupported {
             connection.preferredVideoStabilizationMode = resolvedMode.avMode
         }
+    }
+
+    private func performCameraSwitch(to position: CameraPosition) throws {
+        session.beginConfiguration()
+        defer { session.commitConfiguration() }
+
+        try configureVideoInput(position: position)
+        applyVideoConnectionConfiguration()
+        publishCameraConfiguration()
+        updateStatus("\(position.label) camera ready. Tap record to start buffering.")
     }
 
     private func publishCameraConfiguration() {
@@ -658,9 +669,7 @@ extension ReplayBufferRecorder: AVCaptureFileOutputRecordingDelegate {
             if let nsError = error as NSError?, nsError.code != AVError.maximumDurationReached.rawValue {
                 self.shouldContinueRecording = false
                 self.pendingExportDuration = nil
-                if self.session.isRunning {
-                    self.session.stopRunning()
-                }
+                self.pendingCameraPosition = nil
                 self.updateStatus("Capture interrupted.")
                 self.updateRecordingState(false)
                 self.updateSaveState(false)
@@ -675,12 +684,19 @@ extension ReplayBufferRecorder: AVCaptureFileOutputRecordingDelegate {
                 self.exportCompletedSegments(duration: exportDuration)
             }
 
+            if let pendingCameraPosition = self.pendingCameraPosition {
+                self.pendingCameraPosition = nil
+
+                do {
+                    try self.performCameraSwitch(to: pendingCameraPosition)
+                } catch {
+                    self.alert(error.localizedDescription)
+                }
+            }
+
             if self.shouldContinueRecording {
                 self.startNewSegment()
             } else {
-                if self.session.isRunning {
-                    self.session.stopRunning()
-                }
                 self.updateStatus("Camera ready. Tap record to start buffering.")
                 self.updateRecordingState(false)
             }
@@ -702,7 +718,7 @@ private enum RecorderError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .cameraUnavailable:
-            return "The back camera is not available on this device."
+            return "The requested camera is not available on this device."
         case .microphoneUnavailable:
             return "The microphone is not available on this device."
         case .cannotAddVideoInput:

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 private enum ActiveCameraMenu {
     case replay
@@ -17,18 +18,27 @@ struct ContentView: View {
             CameraPreviewView(session: viewModel.captureSession)
                 .ignoresSafeArea()
 
-            Color.clear
-                .contentShape(Rectangle())
-                .ignoresSafeArea()
-                .gesture(pinchGesture)
-                .onTapGesture {
+            CameraInteractionSurface(
+                onTap: {
                     withAnimation(.easeInOut(duration: 0.18)) {
                         activeMenu = nil
                     }
+                },
+                onPinchStart: {
+                    pinchStartZoomFactor = viewModel.zoomFactor
+                },
+                onPinchChange: { scale in
+                    viewModel.handlePinch(scale: scale, startingZoomFactor: pinchStartZoomFactor ?? viewModel.zoomFactor)
+                },
+                onPinchEnd: {
+                    pinchStartZoomFactor = nil
                 }
+            )
+                .ignoresSafeArea()
 
             previewGradient
                 .ignoresSafeArea()
+                .allowsHitTesting(false)
 
             VStack(spacing: 0) {
                 topBar
@@ -143,35 +153,6 @@ struct ContentView: View {
         CameraMenuCard(title: "Controls", accessory: viewModel.cameraPosition.label, width: 268) {
             VStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Zoom")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.white)
-                        Spacer()
-                        Text(viewModel.formattedZoomFactor)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.white.opacity(0.84))
-                    }
-
-                    Slider(
-                        value: Binding(
-                            get: { viewModel.normalizedZoomValue },
-                            set: { viewModel.setNormalizedZoomValue($0) }
-                        ),
-                        in: 0...1
-                    )
-                    .tint(.yellow)
-                    .disabled(viewModel.maximumZoomFactor <= viewModel.minimumZoomFactor)
-
-                    Text("Pinch anywhere on the preview for smooth zoom.")
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.68))
-                }
-
-                Divider()
-                    .overlay(Color.white.opacity(0.14))
-
-                VStack(alignment: .leading, spacing: 8) {
                     Text("Stabilization")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.white)
@@ -278,7 +259,7 @@ struct ContentView: View {
 
                 UtilityButton(
                     systemName: "arrow.triangle.2.circlepath.camera.fill",
-                    title: viewModel.cameraPosition == .back ? "Flip" : "Rear",
+                    title: "Flip",
                     isEnabled: viewModel.canSwitchCamera,
                     action: viewModel.switchCamera
                 )
@@ -289,20 +270,6 @@ struct ContentView: View {
                 .foregroundStyle(.yellow)
                 .tracking(1.2)
         }
-    }
-
-    private var pinchGesture: some Gesture {
-        MagnificationGesture()
-            .onChanged { scale in
-                if pinchStartZoomFactor == nil {
-                    pinchStartZoomFactor = viewModel.zoomFactor
-                }
-
-                viewModel.handlePinch(scale: scale, startingZoomFactor: pinchStartZoomFactor ?? viewModel.zoomFactor)
-            }
-            .onEnded { _ in
-                pinchStartZoomFactor = nil
-            }
     }
 
     private func toggleMenu(_ menu: ActiveCameraMenu) {
@@ -334,6 +301,82 @@ private struct CameraChromeButton: View {
                 .background((isSelected ? Color.white.opacity(0.22) : Color.black.opacity(0.24)), in: Circle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct CameraInteractionSurface: UIViewRepresentable {
+    let onTap: () -> Void
+    let onPinchStart: () -> Void
+    let onPinchChange: (CGFloat) -> Void
+    let onPinchEnd: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIView(context: Context) -> InteractionView {
+        let view = InteractionView()
+
+        let tapRecognizer = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap))
+        tapRecognizer.cancelsTouchesInView = false
+        tapRecognizer.delegate = context.coordinator
+
+        let pinchRecognizer = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))
+        pinchRecognizer.cancelsTouchesInView = false
+        pinchRecognizer.delegate = context.coordinator
+
+        tapRecognizer.require(toFail: pinchRecognizer)
+        view.addGestureRecognizer(tapRecognizer)
+        view.addGestureRecognizer(pinchRecognizer)
+        return view
+    }
+
+    func updateUIView(_ uiView: InteractionView, context: Context) {
+        context.coordinator.parent = self
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var parent: CameraInteractionSurface
+
+        init(parent: CameraInteractionSurface) {
+            self.parent = parent
+        }
+
+        @objc
+        func handleTap() {
+            parent.onTap()
+        }
+
+        @objc
+        func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
+            switch recognizer.state {
+            case .began:
+                parent.onPinchStart()
+                parent.onPinchChange(recognizer.scale)
+            case .changed:
+                parent.onPinchChange(recognizer.scale)
+            case .ended, .cancelled, .failed:
+                parent.onPinchEnd()
+            default:
+                break
+            }
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            true
+        }
+    }
+}
+
+private final class InteractionView: UIView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
     }
 }
 
