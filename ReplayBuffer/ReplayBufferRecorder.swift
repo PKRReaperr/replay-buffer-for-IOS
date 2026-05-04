@@ -1,4 +1,5 @@
 @preconcurrency import AVFoundation
+import CoreMedia
 import Foundation
 import Photos
 
@@ -56,7 +57,35 @@ enum CameraPosition: String, Identifiable, Sendable {
 final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
     struct RecordedSegment {
         let url: URL
-        let duration: TimeInterval
+        let duration: CMTime
+
+        var durationSeconds: TimeInterval {
+            max(CMTimeGetSeconds(duration), 0)
+        }
+    }
+
+    private final class ActiveSegment {
+        let url: URL
+        let writer: AVAssetWriter
+        let videoInput: AVAssetWriterInput
+        let audioInput: AVAssetWriterInput
+        let startedAt: CMTime
+        var lastVideoEndTime: CMTime
+
+        init(
+            url: URL,
+            writer: AVAssetWriter,
+            videoInput: AVAssetWriterInput,
+            audioInput: AVAssetWriterInput,
+            startedAt: CMTime
+        ) {
+            self.url = url
+            self.writer = writer
+            self.videoInput = videoInput
+            self.audioInput = audioInput
+            self.startedAt = startedAt
+            self.lastVideoEndTime = startedAt
+        }
     }
 
     var onStatusChange: ((String) -> Void)?
@@ -70,7 +99,8 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
     var onAlert: ((String) -> Void)?
 
     private let session: AVCaptureSession
-    private let movieOutput = AVCaptureMovieFileOutput()
+    private let videoDataOutput = AVCaptureVideoDataOutput()
+    private let audioDataOutput = AVCaptureAudioDataOutput()
     private let sessionQueue = DispatchQueue(label: "ReplayBufferRecorder.SessionQueue")
     private let exportQueue = DispatchQueue(label: "ReplayBufferRecorder.ExportQueue", qos: .userInitiated)
 
@@ -79,11 +109,13 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
 
     private var isConfigured = false
     private var shouldContinueRecording = false
-    private var currentSegmentStart = Date()
     private var segments: [RecordedSegment] = []
+    private var currentSegment: ActiveSegment?
     private var pendingExportDuration: TimeInterval?
     private var pendingCameraPosition: CameraPosition?
+    private var forceSegmentRollover = false
     private var videoInput: AVCaptureDeviceInput?
+    private var audioInput: AVCaptureDeviceInput?
     private var videoDevice: AVCaptureDevice?
     private var supportedStabilizationModes: [CameraStabilizationMode] = [.off]
     private var selectedStabilizationMode: CameraStabilizationMode = .off
@@ -118,33 +150,20 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
                     self.session.beginConfiguration()
                     self.session.sessionPreset = .high
 
-                    guard let audioDevice = AVCaptureDevice.default(for: .audio) else {
-                        throw RecorderError.microphoneUnavailable
-                    }
-
-                    let audioInput = try AVCaptureDeviceInput(device: audioDevice)
-                    guard self.session.canAddInput(audioInput) else {
-                        throw RecorderError.cannotAddAudioInput
-                    }
-                    self.session.addInput(audioInput)
-
-                    guard self.session.canAddOutput(self.movieOutput) else {
-                        throw RecorderError.cannotAddMovieOutput
-                    }
-
-                    self.movieOutput.movieFragmentInterval = .invalid
-                    self.movieOutput.maxRecordedFileSize = 0
-                    self.session.addOutput(self.movieOutput)
-
+                    try self.configureAudioInput()
                     try self.configureVideoInput(position: .back)
+                    try self.configureDataOutputs()
                     self.applyVideoConnectionConfiguration()
 
                     self.session.commitConfiguration()
+
                     if !self.session.isRunning {
                         self.session.startRunning()
                     }
+
                     self.isConfigured = true
                     self.publishCameraConfiguration()
+                    self.updateStatus("Camera ready. Tap record to start buffering.")
                     continuation.resume()
                 } catch {
                     self.session.commitConfiguration()
@@ -160,6 +179,7 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
             guard !self.shouldContinueRecording else { return }
 
             self.shouldContinueRecording = true
+            self.forceSegmentRollover = false
 
             if !self.session.isRunning {
                 self.session.startRunning()
@@ -167,20 +187,21 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
 
             self.updateStatus("Recording into replay buffer...")
             self.updateRecordingState(true)
-            self.startNewSegment()
         }
     }
 
     func stop() {
         sessionQueue.async {
             guard self.isConfigured else { return }
-            guard self.shouldContinueRecording || self.movieOutput.isRecording else { return }
+            guard self.shouldContinueRecording || self.currentSegment != nil else { return }
 
             self.shouldContinueRecording = false
+            self.pendingCameraPosition = nil
+            self.forceSegmentRollover = false
             self.updateStatus("Stopping recording...")
 
-            if self.movieOutput.isRecording {
-                self.movieOutput.stopRecording()
+            if self.currentSegment != nil {
+                self.finishCurrentSegment(exportDuration: nil)
             } else {
                 self.updateStatus("Camera ready. Tap record to start buffering.")
                 self.updateRecordingState(false)
@@ -189,12 +210,20 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
     }
 
     func release() {
-        stop()
         sessionQueue.async {
+            self.shouldContinueRecording = false
             self.pendingExportDuration = nil
             self.pendingCameraPosition = nil
+            self.forceSegmentRollover = false
+
+            if let currentSegment = self.currentSegment {
+                currentSegment.writer.cancelWriting()
+                self.currentSegment = nil
+            }
+
             self.segments.removeAll()
             self.updateBufferedDuration(0)
+
             if self.session.isRunning {
                 self.session.stopRunning()
             }
@@ -207,20 +236,20 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
 
     func exportRecentReplay(duration: TimeInterval) {
         sessionQueue.async {
-            let hasBufferedFootage = !self.segments.isEmpty
-            guard self.shouldContinueRecording || self.movieOutput.isRecording || hasBufferedFootage else {
+            let hasBufferedFootage = !self.segments.isEmpty || self.currentSegment != nil
+            guard hasBufferedFootage else {
                 self.alert("No buffered footage is available yet.")
                 return
             }
-            guard self.movieOutput.isRecording else {
-                self.exportCompletedSegments(duration: duration)
-                return
-            }
 
-            self.pendingExportDuration = duration
-            self.updateSaveState(true)
-            self.updateStatus("Closing current segment...")
-            self.movieOutput.stopRecording()
+            if self.currentSegment != nil {
+                self.pendingExportDuration = duration
+                self.forceSegmentRollover = true
+                self.updateSaveState(true)
+                self.updateStatus("Preparing replay...")
+            } else {
+                self.exportCompletedSegments(duration: duration)
+            }
         }
     }
 
@@ -235,7 +264,7 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
                 try videoDevice.lockForConfiguration()
                 videoDevice.videoZoomFactor = clampedZoomFactor
                 videoDevice.unlockForConfiguration()
-                self.updateZoomConfiguration(minimum: 1, maximum: maximumZoomFactor, current: clampedZoomFactor)
+                self.publishCameraConfiguration()
             } catch {
                 self.alert("The camera could not change zoom.")
             }
@@ -254,82 +283,39 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
     func switchCamera() {
         sessionQueue.async {
             guard self.isConfigured else { return }
+
             let targetPosition: CameraPosition = self.cameraPosition == .back ? .front : .back
 
-            guard !self.movieOutput.isRecording else {
+            if self.currentSegment != nil {
                 self.pendingCameraPosition = targetPosition
+                self.forceSegmentRollover = true
                 self.updateStatus("Switching to \(targetPosition.label.lowercased()) camera...")
-                self.movieOutput.stopRecording()
                 return
             }
 
             do {
                 try self.performCameraSwitch(to: targetPosition)
+                self.updateStatus("\(targetPosition.label) camera ready. Tap record to start buffering.")
             } catch {
                 self.alert(error.localizedDescription)
             }
         }
     }
 
-    private func startNewSegment() {
-        guard shouldContinueRecording, !movieOutput.isRecording else { return }
+    private func configureAudioInput() throws {
+        guard audioInput == nil else { return }
 
-        let url = makeSegmentURL()
-        currentSegmentStart = Date()
-        movieOutput.maxRecordedDuration = CMTime(seconds: segmentDuration, preferredTimescale: 600)
-        applyVideoConnectionConfiguration()
-        movieOutput.startRecording(to: url, recordingDelegate: self)
-    }
-
-    private func makeSegmentURL() -> URL {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ReplayBufferSegments", isDirectory: true)
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appendingPathComponent(UUID().uuidString).appendingPathExtension("mov")
-    }
-
-    private func pruneSegmentsIfNeeded() {
-        var retained: [RecordedSegment] = []
-        var totalDuration: TimeInterval = 0
-
-        for segment in segments.reversed() {
-            retained.append(segment)
-            totalDuration += segment.duration
-
-            if totalDuration >= maximumBufferDuration {
-                break
-            }
+        guard let audioDevice = AVCaptureDevice.default(for: .audio) else {
+            throw RecorderError.microphoneUnavailable
         }
 
-        let keep = Array(retained.reversed())
-        let removedURLs = Set(segments.map(\.url)).subtracting(keep.map(\.url))
-        segments = keep
-
-        for url in removedURLs {
-            try? FileManager.default.removeItem(at: url)
+        let input = try AVCaptureDeviceInput(device: audioDevice)
+        guard session.canAddInput(input) else {
+            throw RecorderError.cannotAddAudioInput
         }
 
-        updateBufferedDuration(segments.reduce(0) { $0 + $1.duration })
-    }
-
-    private func maximumZoomFactor(for device: AVCaptureDevice) -> CGFloat {
-        max(1, min(device.activeFormat.videoMaxZoomFactor, 10))
-    }
-
-    private func cameraDevice(for position: CameraPosition) -> AVCaptureDevice? {
-        let deviceTypes: [AVCaptureDevice.DeviceType]
-
-        switch position {
-        case .back:
-            deviceTypes = [.builtInWideAngleCamera]
-        case .front:
-            deviceTypes = [.builtInTrueDepthCamera, .builtInWideAngleCamera]
-        }
-
-        return AVCaptureDevice.DiscoverySession(
-            deviceTypes: deviceTypes,
-            mediaType: .video,
-            position: position == .back ? .back : .front
-        ).devices.first
+        session.addInput(input)
+        audioInput = input
     }
 
     private func configureVideoInput(position: CameraPosition) throws {
@@ -369,6 +355,46 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
         }
     }
 
+    private func configureDataOutputs() throws {
+        if !session.outputs.contains(videoDataOutput) {
+            videoDataOutput.alwaysDiscardsLateVideoFrames = false
+            videoDataOutput.setSampleBufferDelegate(self, queue: sessionQueue)
+            guard session.canAddOutput(videoDataOutput) else {
+                throw RecorderError.cannotAddVideoOutput
+            }
+            session.addOutput(videoDataOutput)
+        }
+
+        if !session.outputs.contains(audioDataOutput) {
+            audioDataOutput.setSampleBufferDelegate(self, queue: sessionQueue)
+            guard session.canAddOutput(audioDataOutput) else {
+                throw RecorderError.cannotAddAudioOutput
+            }
+            session.addOutput(audioDataOutput)
+        }
+    }
+
+    private func cameraDevice(for position: CameraPosition) -> AVCaptureDevice? {
+        let deviceTypes: [AVCaptureDevice.DeviceType]
+
+        switch position {
+        case .back:
+            deviceTypes = [.builtInWideAngleCamera]
+        case .front:
+            deviceTypes = [.builtInTrueDepthCamera, .builtInWideAngleCamera]
+        }
+
+        return AVCaptureDevice.DiscoverySession(
+            deviceTypes: deviceTypes,
+            mediaType: .video,
+            position: position == .back ? .back : .front
+        ).devices.first
+    }
+
+    private func maximumZoomFactor(for device: AVCaptureDevice) -> CGFloat {
+        max(1, min(device.activeFormat.videoMaxZoomFactor, 10))
+    }
+
     private func availableStabilizationModes(for device: AVCaptureDevice) -> [CameraStabilizationMode] {
         var modes: [CameraStabilizationMode] = [.off]
 
@@ -398,14 +424,19 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
     }
 
     private func applyVideoConnectionConfiguration() {
-        guard let connection = movieOutput.connection(with: .video) else { return }
+        guard let connection = videoDataOutput.connection(with: .video) else { return }
 
         if connection.isVideoRotationAngleSupported(90) {
             connection.videoRotationAngle = 90
         }
 
+        if connection.isVideoMirroringSupported {
+            connection.isVideoMirrored = cameraPosition == .front
+        }
+
         let resolvedMode = supportedStabilizationModes.contains(selectedStabilizationMode) ? selectedStabilizationMode : .off
         selectedStabilizationMode = resolvedMode
+
         if connection.isVideoStabilizationSupported {
             connection.preferredVideoStabilizationMode = resolvedMode.avMode
         }
@@ -418,31 +449,257 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
         try configureVideoInput(position: position)
         applyVideoConnectionConfiguration()
         publishCameraConfiguration()
-        updateStatus("\(position.label) camera ready. Tap record to start buffering.")
     }
 
-    private func publishCameraConfiguration() {
-        guard let videoDevice else { return }
+    private func startSegment(with sampleBuffer: CMSampleBuffer) throws {
+        let url = makeSegmentURL()
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
 
-        updateZoomConfiguration(
-            minimum: 1,
-            maximum: maximumZoomFactor(for: videoDevice),
-            current: min(max(videoDevice.videoZoomFactor, 1), maximumZoomFactor(for: videoDevice))
+        let videoSettings = videoWriterSettings()
+        let audioSettings = audioWriterSettings()
+
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        videoInput.expectsMediaDataInRealTime = true
+
+        let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+        audioInput.expectsMediaDataInRealTime = true
+
+        guard writer.canAdd(videoInput), writer.canAdd(audioInput) else {
+            throw RecorderError.cannotCreateSegmentWriter
+        }
+
+        writer.add(videoInput)
+        writer.add(audioInput)
+        writer.startWriting()
+
+        let startTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        writer.startSession(atSourceTime: startTime)
+        currentSegment = ActiveSegment(
+            url: url,
+            writer: writer,
+            videoInput: videoInput,
+            audioInput: audioInput,
+            startedAt: startTime
         )
-        updateAvailableStabilizationModes(supportedStabilizationModes)
-        updateSelectedStabilizationMode(selectedStabilizationMode)
-        updateCameraPosition(cameraPosition)
     }
 
-    private func handleCompletedSegment(at outputURL: URL) {
-        let duration = max(Date().timeIntervalSince(currentSegmentStart), 0)
+    private func videoWriterSettings() -> [String: Any] {
+        if let settings = videoDataOutput.recommendedVideoSettingsForAssetWriter(writingTo: .mov) as? [String: Any] {
+            return settings
+        }
 
-        segments.append(RecordedSegment(url: outputURL, duration: duration))
+        let dimensions: CMVideoDimensions
+        if let videoDevice {
+            dimensions = CMVideoFormatDescriptionGetDimensions(videoDevice.activeFormat.formatDescription)
+        } else {
+            dimensions = CMVideoDimensions(width: 1080, height: 1920)
+        }
+
+        return [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: Int(dimensions.width),
+            AVVideoHeightKey: Int(dimensions.height)
+        ]
+    }
+
+    private func audioWriterSettings() -> [String: Any] {
+        if let settings = audioDataOutput.recommendedAudioSettingsForAssetWriter(writingTo: .mov) as? [String: Any] {
+            return settings
+        }
+
+        return [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 44_100,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderBitRateKey: 128_000
+        ]
+    }
+
+    private func append(sampleBuffer: CMSampleBuffer, to segment: ActiveSegment, mediaType: AVMediaType) {
+        let writerInput = mediaType == .video ? segment.videoInput : segment.audioInput
+        guard writerInput.isReadyForMoreMediaData else { return }
+
+        if writerInput.append(sampleBuffer) {
+            if mediaType == .video {
+                let endTime = sampleEndTime(for: sampleBuffer)
+                if endTime.isValid, CMTimeCompare(endTime, segment.lastVideoEndTime) > 0 {
+                    segment.lastVideoEndTime = endTime
+                }
+
+                updateBufferedDuration(totalBufferedDurationIncludingCurrentSegment())
+            }
+        } else if let error = segment.writer.error {
+            alert(error.localizedDescription)
+        }
+    }
+
+    private func sampleEndTime(for sampleBuffer: CMSampleBuffer) -> CMTime {
+        let startTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        guard startTime.isValid else { return .invalid }
+
+        let duration = CMSampleBufferGetDuration(sampleBuffer)
+        if duration.isValid, !duration.isIndefinite, CMTimeCompare(duration, .zero) > 0 {
+            return CMTimeAdd(startTime, duration)
+        }
+
+        if let fallbackDuration = fallbackVideoFrameDuration() {
+            return CMTimeAdd(startTime, fallbackDuration)
+        }
+
+        return startTime
+    }
+
+    private func fallbackVideoFrameDuration() -> CMTime? {
+        guard let videoDevice else { return nil }
+
+        for candidate in [videoDevice.activeVideoMinFrameDuration, videoDevice.activeVideoMaxFrameDuration] {
+            if candidate.isValid, !candidate.isIndefinite, CMTimeCompare(candidate, .zero) > 0 {
+                return candidate
+            }
+        }
+
+        return nil
+    }
+
+    private func segmentDuration(for segment: ActiveSegment) -> CMTime {
+        guard segment.lastVideoEndTime.isValid else { return .zero }
+
+        let duration = CMTimeSubtract(segment.lastVideoEndTime, segment.startedAt)
+        guard duration.isValid, !duration.isIndefinite, CMTimeCompare(duration, .zero) > 0 else {
+            return .zero
+        }
+
+        return duration
+    }
+
+    private func clampedDuration(_ duration: CMTime, to upperBound: CMTime) -> CMTime {
+        guard duration.isValid, !duration.isIndefinite, CMTimeCompare(duration, .zero) > 0 else {
+            return .zero
+        }
+
+        guard upperBound.isValid, !upperBound.isIndefinite, CMTimeCompare(upperBound, .zero) > 0 else {
+            return duration
+        }
+
+        return CMTimeCompare(duration, upperBound) <= 0 ? duration : upperBound
+    }
+
+    private func finishCurrentSegment(exportDuration: TimeInterval?) {
+        guard let segment = currentSegment else {
+            if let pendingCameraPosition {
+                self.pendingCameraPosition = nil
+                do {
+                    try performCameraSwitch(to: pendingCameraPosition)
+                } catch {
+                    alert(error.localizedDescription)
+                }
+            }
+
+            if let exportDuration {
+                exportCompletedSegments(duration: exportDuration)
+            }
+
+            if !shouldContinueRecording {
+                updateStatus("Camera ready. Tap record to start buffering.")
+                updateRecordingState(false)
+            }
+            return
+        }
+
+        currentSegment = nil
+        forceSegmentRollover = false
+
+        let duration = segmentDuration(for: segment)
+        let pendingCameraPosition = self.pendingCameraPosition
+        self.pendingCameraPosition = nil
+
+        segment.videoInput.markAsFinished()
+        segment.audioInput.markAsFinished()
+
+        if let pendingCameraPosition {
+            do {
+                try performCameraSwitch(to: pendingCameraPosition)
+            } catch {
+                alert(error.localizedDescription)
+            }
+        }
+
+        segment.writer.finishWriting { [weak self] in
+            guard let self else { return }
+
+            let recordedSegment = RecordedSegment(url: segment.url, duration: duration)
+
+            self.sessionQueue.async {
+                self.handleFinishedSegment(recordedSegment)
+
+                if let exportDuration {
+                    self.exportCompletedSegments(duration: exportDuration)
+                }
+
+                if !self.shouldContinueRecording {
+                    self.updateStatus("Camera ready. Tap record to start buffering.")
+                    self.updateRecordingState(false)
+                }
+            }
+        }
+    }
+
+    private func handleFinishedSegment(_ segment: RecordedSegment) {
+        guard segment.durationSeconds > 0 else {
+            try? FileManager.default.removeItem(at: segment.url)
+            updateBufferedDuration(totalBufferedDurationIncludingCurrentSegment())
+            return
+        }
+
+        segments.append(segment)
         pruneSegmentsIfNeeded()
+    }
+
+    private func pruneSegmentsIfNeeded() {
+        var retained: [RecordedSegment] = []
+        var totalDuration: TimeInterval = 0
+
+        for segment in segments.reversed() {
+            retained.append(segment)
+            totalDuration += segment.durationSeconds
+
+            if totalDuration >= maximumBufferDuration {
+                break
+            }
+        }
+
+        let keep = Array(retained.reversed())
+        let removedURLs = Set(segments.map(\.url)).subtracting(keep.map(\.url))
+        segments = keep
+
+        for url in removedURLs {
+            try? FileManager.default.removeItem(at: url)
+        }
+
+        updateBufferedDuration(totalBufferedDurationIncludingCurrentSegment())
+    }
+
+    private func totalBufferedDurationIncludingCurrentSegment() -> TimeInterval {
+        let completedDuration = segments.reduce(0) { $0 + $1.durationSeconds }
+
+        guard let currentSegment else {
+            return completedDuration
+        }
+
+        let activeDuration = max(CMTimeGetSeconds(segmentDuration(for: currentSegment)), 0)
+        return completedDuration + activeDuration
+    }
+
+    private func makeSegmentURL() -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ReplayBufferSegments", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent(UUID().uuidString).appendingPathExtension("mov")
     }
 
     private func exportCompletedSegments(duration: TimeInterval) {
         let snapshot = segments
+
         guard !snapshot.isEmpty else {
             updateSaveState(false)
             updateStatus("The replay buffer has not captured enough footage yet.")
@@ -491,7 +748,10 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
         for segment in selectedSegments {
             let asset = AVURLAsset(url: segment.url)
             let assetDuration = try await asset.load(.duration)
-            let timeRange = CMTimeRange(start: .zero, duration: assetDuration)
+            let segmentDuration = clampedDuration(segment.duration, to: assetDuration)
+            guard CMTimeCompare(segmentDuration, .zero) > 0 else { continue }
+
+            let timeRange = CMTimeRange(start: .zero, duration: segmentDuration)
 
             if let sourceVideoTrack = try await asset.loadTracks(withMediaType: .video).first {
                 try videoTrack?.insertTimeRange(timeRange, of: sourceVideoTrack, at: cursor)
@@ -503,7 +763,7 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
                 try audioTrack?.insertTimeRange(timeRange, of: sourceAudioTrack, at: cursor)
             }
 
-            cursor = cursor + assetDuration
+            cursor = cursor + segmentDuration
         }
 
         let exportDuration = min(requestedDuration, CMTimeGetSeconds(cursor))
@@ -542,7 +802,7 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
 
         for segment in segments.reversed() {
             selection.append(segment)
-            accumulated += segment.duration
+            accumulated += segment.durationSeconds
 
             if accumulated >= requestedDuration {
                 break
@@ -651,6 +911,20 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
         }
     }
 
+    private func publishCameraConfiguration() {
+        guard let videoDevice else { return }
+
+        updateZoomConfiguration(
+            minimum: 1,
+            maximum: maximumZoomFactor(for: videoDevice),
+            current: min(max(videoDevice.videoZoomFactor, 1), maximumZoomFactor(for: videoDevice))
+        )
+        updateAvailableStabilizationModes(supportedStabilizationModes)
+        updateSelectedStabilizationMode(selectedStabilizationMode)
+        updateCameraPosition(cameraPosition)
+        updateBufferedDuration(totalBufferedDurationIncludingCurrentSegment())
+    }
+
     private func alert(_ message: String) {
         DispatchQueue.main.async {
             self.onAlert?(message)
@@ -658,49 +932,65 @@ final class ReplayBufferRecorder: NSObject, @unchecked Sendable {
     }
 }
 
-extension ReplayBufferRecorder: AVCaptureFileOutputRecordingDelegate {
-    func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
-        updateStatus("Buffering the latest five minutes.")
-        updateRecordingState(true)
+extension ReplayBufferRecorder: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
+
+        if output === videoDataOutput {
+            handleVideoSampleBuffer(sampleBuffer)
+        } else if output === audioDataOutput {
+            handleAudioSampleBuffer(sampleBuffer)
+        }
     }
 
-    func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
-        sessionQueue.async {
-            if let nsError = error as NSError?, nsError.code != AVError.maximumDurationReached.rawValue {
-                self.shouldContinueRecording = false
-                self.pendingExportDuration = nil
-                self.pendingCameraPosition = nil
-                self.updateStatus("Capture interrupted.")
-                self.updateRecordingState(false)
-                self.updateSaveState(false)
-                self.alert(nsError.localizedDescription)
-                return
-            }
+    private func handleVideoSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
+        let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        guard timestamp.isValid else { return }
 
-            self.handleCompletedSegment(at: outputFileURL)
+        if let currentSegment, pendingCameraPosition != nil {
+            append(sampleBuffer: sampleBuffer, to: currentSegment, mediaType: .video)
+            let exportDuration = pendingExportDuration
+            pendingExportDuration = nil
+            finishCurrentSegment(exportDuration: exportDuration)
+            return
+        }
 
-            if let exportDuration = self.pendingExportDuration {
-                self.pendingExportDuration = nil
-                self.exportCompletedSegments(duration: exportDuration)
-            }
+        if let currentSegment {
+            let projectedEndTime = sampleEndTime(for: sampleBuffer)
+            let effectiveEndTime = projectedEndTime.isValid ? projectedEndTime : timestamp
+            let projectedDuration = max(
+                CMTimeGetSeconds(CMTimeSubtract(effectiveEndTime, currentSegment.startedAt)),
+                0
+            )
 
-            if let pendingCameraPosition = self.pendingCameraPosition {
-                self.pendingCameraPosition = nil
-
-                do {
-                    try self.performCameraSwitch(to: pendingCameraPosition)
-                } catch {
-                    self.alert(error.localizedDescription)
-                }
-            }
-
-            if self.shouldContinueRecording {
-                self.startNewSegment()
-            } else {
-                self.updateStatus("Camera ready. Tap record to start buffering.")
-                self.updateRecordingState(false)
+            if forceSegmentRollover || projectedDuration >= segmentDuration {
+                let exportDuration = pendingExportDuration
+                pendingExportDuration = nil
+                finishCurrentSegment(exportDuration: exportDuration)
             }
         }
+
+        guard shouldContinueRecording else { return }
+
+        if currentSegment == nil {
+            do {
+                try startSegment(with: sampleBuffer)
+            } catch {
+                shouldContinueRecording = false
+                updateRecordingState(false)
+                alert(error.localizedDescription)
+                return
+            }
+        }
+
+        if let currentSegment {
+            append(sampleBuffer: sampleBuffer, to: currentSegment, mediaType: .video)
+        }
+    }
+
+    private func handleAudioSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
+        guard shouldContinueRecording, let currentSegment else { return }
+        append(sampleBuffer: sampleBuffer, to: currentSegment, mediaType: .audio)
     }
 }
 
@@ -709,8 +999,10 @@ private enum RecorderError: LocalizedError {
     case microphoneUnavailable
     case cannotAddVideoInput
     case cannotAddAudioInput
-    case cannotAddMovieOutput
+    case cannotAddVideoOutput
+    case cannotAddAudioOutput
     case cannotConfigureCamera
+    case cannotCreateSegmentWriter
     case noSegmentsToExport
     case cannotCreateExportSession
     case photoLibrarySaveFailed
@@ -725,10 +1017,14 @@ private enum RecorderError: LocalizedError {
             return "The app could not attach the video input."
         case .cannotAddAudioInput:
             return "The app could not attach the audio input."
-        case .cannotAddMovieOutput:
-            return "The app could not create the movie output."
+        case .cannotAddVideoOutput:
+            return "The app could not create the video capture output."
+        case .cannotAddAudioOutput:
+            return "The app could not create the audio capture output."
         case .cannotConfigureCamera:
             return "The selected camera could not be configured."
+        case .cannotCreateSegmentWriter:
+            return "The app could not create the rolling segment writer."
         case .noSegmentsToExport:
             return "There is not enough buffered footage to export yet."
         case .cannotCreateExportSession:
